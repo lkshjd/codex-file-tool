@@ -4,6 +4,7 @@ const os = require("os");
 const cp = require("child_process");
 
 const HOME = os.homedir();
+const TMP_DIR = path.join(HOME, ".codex", "tmp");
 const BACKUP_DIR = path.join(HOME, ".codex", "backups");
 
 // ---- helpers ----
@@ -18,6 +19,7 @@ function backup(filePath) {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const dest = path.join(BACKUP_DIR, k + "_" + stamp);
   fs.mkdirSync(BACKUP_DIR, { recursive: true });
+fs.mkdirSync(TMP_DIR, { recursive: true });
   fs.copyFileSync(filePath, dest);
   return dest;
 }
@@ -133,7 +135,6 @@ function usage() {
   console.log("  mkdir  <dir>                          Create directory");
   console.log("  ls     [dir]                          List directory");
   console.log("  search <pattern> [dir] [glob]         Recursive search (default: . *)");
-  console.log("  replace-safe <f> <find_tmp> <rep_tmp> Safe replace via temp files (for content with $ { })");
   console.log("  clean-backups [--keep <n>]            Keep only latest n backups per file (default: 20)");
   console.log("");
   console.log("  All writes: add --dry-run to preview.");
