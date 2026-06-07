@@ -106,25 +106,36 @@ function showDiff(oldStr, newStr) {
 const rawArgs = process.argv.slice(2);
 const dryRun = rawArgs.includes("--dry-run");
 const args = rawArgs.filter(a => a !== "--dry-run");
+const flags = rawArgs.filter(a => a.startsWith("--"));
+const posArgs = rawArgs.filter(a => !a.startsWith("--"));
 const cmd = args[0];
 
+const hasFlag = (name) => flags.includes("--" + name);
+const flagVal = (name) => {
+  const idx = rawArgs.indexOf("--" + name);
+  return idx >= 0 && idx + 1 < rawArgs.length && !rawArgs[idx+1].startsWith("--") ? rawArgs[idx+1] : null;
+};
+
 function usage() {
-  console.log("_tool.js - Codex file helper (global)");
-  console.log("  read          <file> [from] [to]      read file (optional line range)");
-  console.log("  write         <file>                 write file from stdin (auto-backup)");
-  console.log("  info          <file>                 show encoding, line endings, size");
-  console.log("  revert        <file>                 restore from backup or git");
-  console.log("  replace       <file>                 stdin: FIND\\n---\\nREPLACE");
-  console.log("  replace-str   <file> <find> <replace> replace string directly (no stdin)");
-  console.log("  replace-block <file>                 stdin: ---marker\\n<marker>\\n---body\\n<replacement>");
-  console.log("  replace-all   <file>                 stdin: batch of FIND\\n---\\nREPLACE separated by ===\\n");
-  console.log("  delete-lines  <file> <from> <to>     delete lines (1-based, inclusive)");
-  console.log("  replace-lines <file> <from> <to>     replace lines (1-based, inclusive), stdin = new content");
-  console.log("  insert-at     <file> <line>          insert stdin content before line (1-based)");
-  console.log("  mkdir         <dir>                  create directory");
-  console.log("  ls            [dir]                  list directory");
-  console.log("  search        <pattern> [dir] [glob]  search files recursively (default: . *.dart)");
-  console.log("  Add --dry-run before <file> to preview changes without writing.");
+  console.log("_tool.js - Codex file helper");
+  console.log("");
+  console.log("  read  <file> [from] [to]              Read file (optional line range)");
+  console.log("  write <file> --content <tmpfile>      Write file from temp file");
+  console.log("  info  <file>                          Show encoding, line endings, size");
+  console.log("  revert <file>                         Restore from backup or git");
+  console.log("");
+  console.log("  replace <file> [options]              Unified replace (never uses stdin)");
+  console.log("    --find <str> --with <str>           String replacement");
+  console.log("    --from <n> --to <n> [--with-file <tmp>]  Line replacement (omit --with-file = delete)");
+  console.log("    --patch-file <tmp>                  Batch: file with FIND\\n---\\nREPLACE (=== separated)");
+  console.log("");
+  console.log("  insert-at <file> <line> --content <tmp>  Insert before line");
+  console.log("  mkdir  <dir>                          Create directory");
+  console.log("  ls     [dir]                          List directory");
+  console.log("  search <pattern> [dir] [glob]         Recursive search (default: . *)");
+  console.log("  clean-backups [--keep <n>]            Keep only latest n backups per file (default: 20)");
+  console.log("");
+  console.log("  All writes: add --dry-run to preview.");
   process.exit(1);
 }
 
@@ -223,39 +234,77 @@ switch (cmd) {
 
   // ======== replace ========
   case "replace": {
-    const f = args[1]; if (!f) usage();
-    readStdin(data => {
-      const sep = "\n---\n";
-      const sepIdx = data.indexOf(sep);
-      if (sepIdx < 0) {
-        console.error("REPLACE: stdin must be FIND\\n---\\nREPLACE");
-        process.exit(1);
-      }
-      const findStr = data.substring(0, sepIdx);
-      const replaceStr = data.substring(sepIdx + sep.length);
+    const f = posArgs[1]; if (!f) usage();
+    if (!fs.existsSync(f)) { console.error("REPLACE: file not found: " + f); process.exit(1); }
 
-      let content = readFileLF(f);
+    const findStr = flagVal("find");
+    const withStr = flagVal("with");
+    const fromLine = flagVal("from");
+    const toLine = flagVal("to");
+    const withFile = flagVal("with-file");
+    const patchFile = flagVal("patch-file");
+
+    let content = readFileUTF8(f);
+
+    // Mode 1: String replace
+    if (findStr !== null) {
       if (!content.includes(findStr)) {
-        console.error("REPLACE: find string not found in file");
+        console.error("REPLACE: find string not found in " + f);
         console.error(findContext(content, findStr));
         process.exit(1);
       }
-      const newContent = content.replaceAll(findStr, replaceStr);
-      if (dryRun) {
-        console.log("[DRY-RUN] replace " + f);
-        showDiff(content, newContent);
-      } else {
-        const bak = backup(f);
-        const count = content.split(findStr).length - 1;
-        fs.writeFileSync(f, newContent, "utf-8");
-        console.log("REPLACED " + count + " occurrence(s) -> " + f);
-        if (bak) console.log("  backup: " + bak);
+      const newContent = content.replaceAll(findStr, withStr ?? "");
+      if (dryRun) { console.log("[DRY-RUN] replace " + f); showDiff(content, newContent); }
+      else { const bak = backup(f); fs.writeFileSync(f, newContent, "utf-8"); console.log("REPLACED -> " + f); if (bak) console.log("  backup: " + bak); }
+      break;
+    }
+
+    // Mode 2: Patch file (batch)
+    if (patchFile !== null) {
+      if (!fs.existsSync(patchFile)) { console.error("REPLACE: patch file not found: " + patchFile); process.exit(1); }
+      const patchContent = readFileUTF8(patchFile);
+      const blocks = patchContent.split("\n===\n");
+      let nr = 0;
+      for (const block of blocks) {
+        const parts = block.split("\n---\n");
+        if (parts.length !== 2) continue;
+        if (content.includes(parts[0])) { content = content.replaceAll(parts[0], parts[1]); nr++; }
       }
-    });
+      if (nr === 0) { console.error("REPLACE: no patch blocks matched"); process.exit(1); }
+      if (dryRun) { console.log("[DRY-RUN] replace-patch " + f + " (" + nr + " blocks)"); showDiff(readFileUTF8(f), content); }
+      else { const bak = backup(f); fs.writeFileSync(f, content, "utf-8"); console.log("REPLACED " + nr + " blocks -> " + f); if (bak) console.log("  backup: " + bak); }
+      break;
+    }
+
+    // Mode 3: Line replacement
+    if (fromLine !== null) {
+      const from = parseInt(fromLine), to = toLine !== null ? parseInt(toLine) : from;
+      if (isNaN(from) || isNaN(to)) { console.error("REPLACE: invalid --from/--to"); process.exit(1); }
+      const lines = content.replace(/\r\n/g, "\n").split("\n");
+      const fi = from - 1, ti = to - 1;
+      if (fi < 0 || ti >= lines.length || fi > ti) {
+        console.error("REPLACE: invalid range " + from + "-" + to + " (file has " + lines.length + " lines)");
+        process.exit(1);
+      }
+      if (withFile !== null) {
+        if (!fs.existsSync(withFile)) { console.error("REPLACE: --with-file not found: " + withFile); process.exit(1); }
+        const repl = readFileUTF8(withFile).replace(/\r\n/g, "\n").replace(/\n$/, "");
+        lines.splice(fi, ti - fi + 1, repl);
+      } else {
+        lines.splice(fi, ti - fi + 1);
+      }
+      const newContent = lines.join("\n");
+      if (dryRun) { console.log("[DRY-RUN] replace-lines " + f + " " + from + "-" + to); showDiff(content.replace(/\r\n/g, "\n"), newContent); }
+      else { const bak = backup(f); fs.writeFileSync(f, newContent, "utf-8"); console.log("REPLACED lines " + from + "-" + to + " -> " + f); if (bak) console.log("  backup: " + bak); }
+      break;
+    }
+
+    console.error("REPLACE: need --find/--with, --from/--to, or --patch-file");
+    usage();
     break;
   }
 
-  // ======== replace-block ========
+  // ======== replace-block (legacy) ========
   case "replace-block": {
     const f = args[1];
     if (!f) usage();
@@ -482,12 +531,16 @@ switch (cmd) {
     break;
   }
 
+  // ======== replace (unified) ========
+
+  // ======== replace-str (legacy) ========
+
   // ======== search ========
 
   case "search": {
     const pattern = args[1];
     const dir = args[2] || ".";
-    const _glob = args[3] || "*.dart";
+    const _glob = args[3] || "*";
     if (!pattern) { console.error("SEARCH: pattern required"); usage(); }
 
     function searchFile(filePath) {
@@ -522,6 +575,31 @@ switch (cmd) {
     break;
   }
 
+
+
+  // ======== clean-backups ========
+  case "clean-backups": {
+    const keep = rawArgs.includes("--keep") ? parseInt(rawArgs[rawArgs.indexOf("--keep")+1]) || 20 : 20;
+    if (!fs.existsSync(BACKUP_DIR)) { console.log("CLEAN-BACKUPS: no backups"); break; }
+    const groups = {};
+    for (const f of fs.readdirSync(BACKUP_DIR)) {
+      const u = f.lastIndexOf("_");
+      if (u < 0) continue;
+      const base = f.substring(0, u);
+      if (!groups[base]) groups[base] = [];
+      groups[base].push(f);
+    }
+    let deleted = 0;
+    for (const base of Object.keys(groups)) {
+      const list = groups[base].sort().reverse();
+      for (let i = keep; i < list.length; i++) {
+        fs.unlinkSync(path.join(BACKUP_DIR, list[i]));
+        deleted++;
+      }
+    }
+    console.log("CLEAN-BACKUPS: deleted " + deleted + ", keeping " + keep + " per file");
+    break;
+  }
 
   default: usage();
 }
