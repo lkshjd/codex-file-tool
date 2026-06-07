@@ -133,6 +133,7 @@ function usage() {
   console.log("  mkdir  <dir>                          Create directory");
   console.log("  ls     [dir]                          List directory");
   console.log("  search <pattern> [dir] [glob]         Recursive search (default: . *)");
+  console.log("  replace-safe <f> <find_tmp> <rep_tmp> Safe replace via temp files (for content with $ { })");
   console.log("  clean-backups [--keep <n>]            Keep only latest n backups per file (default: 20)");
   console.log("");
   console.log("  All writes: add --dry-run to preview.");
@@ -237,8 +238,17 @@ switch (cmd) {
     const f = posArgs[1]; if (!f) usage();
     if (!fs.existsSync(f)) { console.error("REPLACE: file not found: " + f); process.exit(1); }
 
-    const findStr = flagVal("find");
-    const withStr = flagVal("with");
+    let findStr = flagVal("find");
+    const findFile = flagVal("find-file");
+    if (findStr === null && findFile !== null) {
+      if (!fs.existsSync(findFile)) { console.error("REPLACE: --find-file not found: " + findFile); process.exit(1); }
+      findStr = readFileUTF8(findFile);
+    }
+    let withStr = flagVal("with");
+    if (withStr === null && findFile !== null) {
+      // If using --find-file, --with must also be a file (--with-file)
+      withStr = withFile !== null ? readFileUTF8(withFile) : null;
+    }
     const fromLine = flagVal("from");
     const toLine = flagVal("to");
     const withFile = flagVal("with-file");
@@ -598,6 +608,47 @@ switch (cmd) {
       }
     }
     console.log("CLEAN-BACKUPS: deleted " + deleted + ", keeping " + keep + " per file");
+    break;
+  }
+
+
+  // ======== replace-safe ========
+  // Reads find/replace from temp files, zero PowerShell exposure
+  case "replace-safe": {
+    const target = posArgs[1], findFile = posArgs[2], replaceFile = posArgs[3];
+    if (!target || !findFile || !replaceFile) {
+      console.error("replace-safe: usage: replace-safe <target> <find_file> <replace_file>");
+      process.exit(1);
+    }
+    if (!fs.existsSync(target)) { console.error("replace-safe: target not found: " + target); process.exit(1); }
+    if (!fs.existsSync(findFile)) { console.error("replace-safe: find file not found: " + findFile); process.exit(1); }
+    if (!fs.existsSync(replaceFile)) { console.error("replace-safe: replace file not found: " + replaceFile); process.exit(1); }
+
+    const content = readFileUTF8(target);
+    const findStr = readFileUTF8(findFile);
+    const replaceStr = readFileUTF8(replaceFile);
+
+    if (!content.includes(findStr)) {
+      console.error("replace-safe: find string not found in " + target);
+      // Show hex context for debugging
+      const firstLine = findStr.split("\n")[0];
+      const pos = content.indexOf(firstLine);
+      if (pos >= 0) {
+        console.error("  partial match at offset " + pos + ". Check CR/LF and whitespace.");
+      }
+      process.exit(1);
+    }
+
+    if (dryRun) {
+      console.log("[DRY-RUN] replace-safe " + target);
+      showDiff(content, content.replace(findStr, replaceStr));
+    } else {
+      const bak = backup(target);
+      const result = content.replaceAll(findStr, replaceStr);
+      fs.writeFileSync(target, result, "utf-8");
+      console.log("REPLACED (safe) -> " + target);
+      if (bak) console.log("  backup: " + bak);
+    }
     break;
   }
 
